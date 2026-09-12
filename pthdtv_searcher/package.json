@@ -1,0 +1,8 @@
+{
+  "name": "PTHDTVSearcher",
+  "description": "为 MoviePilot V2 添加 PTHDTV.com (高清剧集网) 站点搜索支持，支持 Discuz 论坛两级抓取",
+  "version": "1.0.0",
+  "icon": "movie.png",
+  "author": "ToryTian",
+  "level": 2
+}
