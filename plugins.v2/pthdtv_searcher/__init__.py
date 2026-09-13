@@ -16,7 +16,7 @@ class PTHDTVSearcher(_PluginBase):
     plugin_name = "PTHDTV 站点搜索"
     plugin_desc = "为 MoviePilot 添加 PTHDTV.com (高清剧集网) 站点搜索支持，自动实现 Discuz 论坛两级抓取"
     plugin_icon = "movie.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "ToryTian"
     plugin_config_prefix = "pthdtv_searcher_"
     plugin_order = 20
@@ -46,6 +46,7 @@ class PTHDTVSearcher(_PluginBase):
         if not self._cookie:
             logger.warn("PTHDTV 插件已启用但未配置 Cookie")
             return
+        self._register_site()
         self._patch_search()
         logger.info("PTHDTV 站点搜索插件已启动")
 
@@ -175,6 +176,62 @@ class PTHDTVSearcher(_PluginBase):
     def stop_service(self):
         self._unpatch_search()
         logger.info("PTHDTV 站点搜索插件已停止")
+
+    def _register_site(self):
+        try:
+            from app.helper.sites import SitesHelper
+            indexer_config = {
+                "id": "pthdtv",
+                "name": "PTHDTV",
+                "domain": self.DEFAULT_DOMAIN,
+                "url": self.DEFAULT_DOMAIN,
+                "encoding": "UTF-8",
+                "public": False,
+                "parser": "PTHDTV",
+                "timeout": self._timeout,
+                "result_num": 50,
+                "cookie": self._cookie,
+                "ua": self._ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "search": {
+                    "paths": [
+                        {
+                            "path": "search.php?mod=forum&searchsubmit=yes&srchtype=title&srhfid=2&srhlocality=forum::forumdisplay&srchtxt={keyword}",
+                            "method": "get"
+                        }
+                    ],
+                },
+                "torrents": {
+                    "list": {"selector": "li.pbw"},
+                    "fields": {
+                        "title": {"selector": "h3.xs3 a"},
+                        "details": {"selector": "h3.xs3 a", "attribute": "href"},
+                    }
+                },
+                "category": {"movie": [], "tv": []},
+            }
+            SitesHelper().add_indexer(
+                domain="pthdtv.com",
+                indexer=indexer_config
+            )
+            logger.info("PTHDTV 站点已注册到 MoviePilot")
+        except ImportError:
+            logger.warn("SitesHelper 不可用，尝试直接写入站点配置")
+            try:
+                from app.db.site_oper import SiteOper
+                SiteOper().add({
+                    "name": "PTHDTV",
+                    "domain": "pthdtv.com",
+                    "url": self.DEFAULT_DOMAIN,
+                    "cookie": self._cookie,
+                    "ua": self._ua or "",
+                    "parser": "PTHDTV",
+                    "is_active": 1,
+                })
+                logger.info("PTHDTV 站点已通过 SiteOper 注册")
+            except Exception as e2:
+                logger.error(f"PTHDTV 站点注册失败: {e2}")
+        except Exception as e:
+            logger.error(f"PTHDTV 站点注册失败: {e}")
 
     def _patch_search(self):
         try:
