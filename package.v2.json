@@ -4,7 +4,7 @@
     "name": "PTHDTV 站点搜索",
     "description": "为 MoviePilot V2 添加 PTHDTV.com (高清剧集网) 站点搜索支持，基于 Discuz 论坛两级抓取（搜索结果页 → 帖子详情页 → 种子下载链接）",
     "labels": ["搜索", "站点"],
-    "version": "2.3.0",
+    "version": "2.4.0",
     "icon": "movie.png",
     "author": "ToryTian",
     "level": 1,
@@ -17,7 +17,8 @@
       "v2.0.1": "Cookie 有效性保护，避免异常短值覆盖数据库中的有效 Cookie；搜索日志增加 Cookie 长度",
       "v2.1.0": "新增出口代理配置：支持指定代理访问站点，解决 NAS 在境外导致的登录态 IP 校验失败",
       "v2.2.0": "关键修复：绕开 MoviePilot RequestUtils 对 Cookie 值的 URL 解码（会破坏 Discuz 认证串），改用原始 Cookie 头直发",
-      "v2.3.0": "关键修复：改用 urllib 发送请求（requests 会被站点判为未登录并重定向到注册页，实测 urllib 正常）"
+      "v2.3.0": "关键修复：改用 urllib 发送请求（requests 会被站点判为未登录并重定向到注册页，实测 urllib 正常）",
+      "v2.4.0": "关键修复：同时接管异步搜索 async_search_torrents（Web 端搜索走异步方法，此前只接管同步方法导致搜索无结果）"
     }
   }
 }

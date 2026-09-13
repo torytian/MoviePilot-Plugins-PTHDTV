@@ -41,7 +41,7 @@ class PTHDTVSearcher(_PluginBase):
     plugin_name = "PTHDTV 站点搜索"
     plugin_desc = "为 MoviePilot 添加 PTHDTV.com (高清剧集网) 站点搜索支持，自动实现 Discuz 论坛两级抓取"
     plugin_icon = "movie.png"
-    plugin_version = "2.3.0"
+    plugin_version = "2.4.0"
     plugin_author = "ToryTian"
     plugin_config_prefix = "pthdtv_searcher_"
     plugin_order = 20
@@ -439,8 +439,13 @@ class PTHDTVSearcher(_PluginBase):
             self._orig["IndexerModule"] = IndexerModule
             if "search_torrents" not in self._orig:
                 self._orig["search_torrents"] = IndexerModule.search_torrents
+            if "async_search_torrents" not in self._orig:
+                self._orig["async_search_torrents"] = getattr(
+                    IndexerModule, "async_search_torrents", None
+                )
 
             original = self._orig["search_torrents"]
+            original_async = self._orig.get("async_search_torrents")
             plugin = self
 
             def patched_search_torrents(self_, site, keyword=None, mtype=None, cat=None, page=0):
@@ -449,7 +454,28 @@ class PTHDTVSearcher(_PluginBase):
                 return original(self_, site, keyword=keyword, mtype=mtype, cat=cat, page=page)
 
             IndexerModule.search_torrents = patched_search_torrents
-            logger.info("PTHDTV 搜索接管已安装")
+
+            # MoviePilot 的 Web 端搜索走的是异步方法 async_search_torrents，
+            # 必须一并接管，否则会被内置的通用解析器处理（表现为搜索无结果）。
+            if original_async:
+                async def patched_async_search_torrents(self_, site, keyword=None,
+                                                        mtype=None, cat=None, page=0):
+                    if plugin._is_pthdtv(site):
+                        import asyncio
+                        loop = asyncio.get_running_loop()
+                        return await loop.run_in_executor(
+                            None, plugin._do_search, site, keyword, page
+                        )
+                    return await original_async(
+                        self_, site, keyword=keyword, mtype=mtype, cat=cat, page=page
+                    )
+
+                IndexerModule.async_search_torrents = patched_async_search_torrents
+
+            logger.info(
+                "PTHDTV 搜索接管已安装（同步 %s / 异步 %s）"
+                % (bool(original), bool(original_async))
+            )
         except Exception as e:
             logger.error(f"PTHDTV 搜索接管失败: {e}")
 
@@ -477,8 +503,11 @@ class PTHDTVSearcher(_PluginBase):
 
         try:
             indexer = self._orig.get("IndexerModule")
-            if indexer and self._orig.get("search_torrents"):
-                indexer.search_torrents = self._orig["search_torrents"]
+            if indexer:
+                if self._orig.get("search_torrents"):
+                    indexer.search_torrents = self._orig["search_torrents"]
+                if self._orig.get("async_search_torrents"):
+                    indexer.async_search_torrents = self._orig["async_search_torrents"]
         except Exception:
             pass
 
