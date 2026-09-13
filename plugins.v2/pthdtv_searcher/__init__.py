@@ -12,12 +12,14 @@ PTHDTV.com 基于 Discuz! X3.4 论坛，种子下载链接在帖子详情页内�
    命中 PTHDTV 时执行两级抓取。
 """
 import re
+import ssl
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 from urllib.parse import quote, urljoin
 
-import requests
 from pyquery import PyQuery
 
 from app.log import logger
@@ -25,11 +27,21 @@ from app.plugins import _PluginBase
 from app.utils.string import StringUtils
 
 
+class _HttpResponse:
+    """统一的响应对象，字段与 requests.Response 对齐"""
+    __slots__ = ("status_code", "text", "url")
+
+    def __init__(self, status_code: int, text: str, url: str):
+        self.status_code = status_code
+        self.text = text
+        self.url = url
+
+
 class PTHDTVSearcher(_PluginBase):
     plugin_name = "PTHDTV 站点搜索"
     plugin_desc = "为 MoviePilot 添加 PTHDTV.com (高清剧集网) 站点搜索支持，自动实现 Discuz 论坛两级抓取"
     plugin_icon = "movie.png"
-    plugin_version = "2.2.0"
+    plugin_version = "2.3.0"
     plugin_author = "ToryTian"
     plugin_config_prefix = "pthdtv_searcher_"
     plugin_order = 20
@@ -475,28 +487,51 @@ class PTHDTVSearcher(_PluginBase):
     # ------------------------------------------------------------------
     # HTTP 请求
     #
-    # 注意：此处刻意不使用 MoviePilot 的 RequestUtils。
-    # 它的 cookie_parse() 会对 Cookie 的「值」做 URL 解码（_url_decode_if_latin），
-    # 而 Discuz 的 auth 等 Cookie 本身是 URL 编码的（含 %2B 等），
-    # 二次解码后服务端 PHP 会再解一次（+ 被还原成空格），导致认证串损坏、登录态丢失。
-    # 因此这里把 Cookie 原样作为请求头发送。
+    # 这两个坑都必须绕开，且都已实测验证：
+    #
+    # 1) 不用 MoviePilot 的 RequestUtils：它的 cookie_parse() 会对 Cookie 的「值」
+    #    做 URL 解码（_url_decode_if_latin），而 Discuz 的 auth 等 Cookie 本身是
+    #    URL 编码的（含 %2B 等），二次解码后服务端 PHP 会再解一次（+ 变成空格），
+    #    认证串被破坏，登录态丢失。
+    #
+    # 2) 不用 requests：同样的 Cookie、同样的出口 IP、同样的 URL，
+    #    requests 发起的请求会被站点判为未登录并重定向到注册页，
+    #    而 urllib 能正常拿到搜索结果。因此这里统一用 urllib 实现。
+    #
+    # 结论：Cookie 原样作为请求头，由 urllib 发送，才与浏览器行为一致。
     # ------------------------------------------------------------------
+    @staticmethod
+    def _build_opener(proxies: dict = None):
+        handlers = []
+        # 明确指定代理（为空则强制直连，避免受容器环境变量代理影响）
+        handlers.append(urllib.request.ProxyHandler(proxies or {}))
+        # 与站点实际部署情况一致，跳过证书校验
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+        return urllib.request.build_opener(*handlers)
+
     def _http_get(self, url: str, cookie: str, ua: str, timeout: int,
                   referer: str = None, proxies: dict = None):
         headers = {"User-Agent": ua, "Cookie": cookie}
         if referer:
             headers["Referer"] = referer
+        request = urllib.request.Request(url, headers=headers)
+        opener = self._build_opener(proxies)
         try:
-            return requests.get(
-                url,
-                headers=headers,
-                timeout=timeout,
-                verify=False,
-                allow_redirects=True,
-                proxies=proxies,
-            )
-        except Exception as e:
-            logger.debug(f"PTHDTV 请求失败: {url} - {e}")
+            with opener.open(request, timeout=timeout) as raw:
+                body = raw.read()
+                return _HttpResponse(
+                    getattr(raw, "status", 200),
+                    body.decode("utf-8", "ignore"),
+                    raw.geturl(),
+                )
+        except urllib.error.HTTPError as err:
+            body = err.read() if hasattr(err, "read") else b""
+            return _HttpResponse(err.code, body.decode("utf-8", "ignore"), getattr(err, "url", url))
+        except Exception as err:
+            logger.debug(f"PTHDTV 请求失败: {url} - {err}")
             return None
 
     # ------------------------------------------------------------------
