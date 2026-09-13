@@ -4,15 +4,16 @@
     "name": "PTHDTV 站点搜索",
     "description": "为 MoviePilot V2 添加 PTHDTV.com (高清剧集网) 站点搜索支持，基于 Discuz 论坛两级抓取（搜索结果页 → 帖子详情页 → 种子下载链接）",
     "labels": ["搜索", "站点"],
-    "version": "1.0.2",
+    "version": "1.0.3",
     "icon": "movie.png",
     "author": "ToryTian",
-    "level": 0,
+    "level": 1,
     "release": true,
     "history": {
       "v1.0.0": "初始版本",
-      "v1.0.1": "修复 V2 导入路径问题，移除不存在的模块依赖",
-      "v1.0.2": "修复导入路径，惰性加载"
+      "v1.0.1": "修复 V2 导入路径问题",
+      "v1.0.2": "修复导入路径，惰性加载",
+      "v1.0.3": "合并 spider 到单文件，恢复 auth_level 和 plugin_config_prefix"
     }
   }
 }
