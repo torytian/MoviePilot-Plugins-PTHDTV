@@ -1,0 +1,17 @@
+{
+  "pthdtv_searcher": {
+    "id": "pthdtv_searcher",
+    "name": "PTHDTV 站点搜索",
+    "description": "为 MoviePilot V2 添加 PTHDTV.com (高清剧集网) 站点搜索支持，基于 Discuz 论坛两级抓取（搜索结果页 → 帖子详情页 → 种子下载链接）",
+    "labels": ["搜索", "站点"],
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/torytian/MoviePilot-Plugins-PTHDTV/main/plugins.v2/pthdtv_searcher/movie.png",
+    "author": "ToryTian",
+    "level": 1,
+    "release": false,
+    "system_version": ">=2.0.0,<3",
+    "history": {
+      "v1.0.0": "初始版本：PTHDTV 站点搜索插件，支持 Discuz 论坛两级抓取"
+    }
+  }
+}

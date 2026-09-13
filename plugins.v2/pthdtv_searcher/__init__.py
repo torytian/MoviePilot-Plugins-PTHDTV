@@ -10,7 +10,7 @@ from app.core.context import TorrentInfo
 from app.helper.sites import SitesHelper
 from app.log import logger
 from app.plugins import _PluginBase
-from app.plugins.pthdtv_searcher.spider import PTHDTVSpider
+from .spider import PTHDTVSpider
 
 # 站点域名
 PTHDTV_DOMAIN = "https://10002.baidubaidu.win/"
