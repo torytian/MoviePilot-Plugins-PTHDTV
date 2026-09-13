@@ -16,7 +16,7 @@ class PTHDTVSearcher(_PluginBase):
     plugin_name = "PTHDTV 站点搜索"
     plugin_desc = "为 MoviePilot 添加 PTHDTV.com (高清剧集网) 站点搜索支持，自动实现 Discuz 论坛两级抓取"
     plugin_icon = "movie.png"
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     plugin_author = "ToryTian"
     plugin_config_prefix = "pthdtv_searcher_"
     plugin_order = 20
@@ -211,7 +211,7 @@ class PTHDTVSearcher(_PluginBase):
             original = self._original_search
             plugin = self
             def patched_search_torrents(self_, site, keyword=None, mtype=None, cat=None, page=0):
-                if site.get("parser") == "PTHDTV":
+                if site.get("domain") == "pthdtv.com" or site.get("name") == "PTHDTV":
                     return plugin._do_search(site, keyword, page)
                 return original(self_, site, keyword=keyword, mtype=mtype, cat=cat, page=page)
             IndexerModule.search_torrents = patched_search_torrents
@@ -235,7 +235,7 @@ class PTHDTVSearcher(_PluginBase):
             return []
         search_word = StringUtils.clear(keyword, replace_word=" ", allow_space=True)
         start_time = datetime.now()
-        domain = site.get("domain", self.DEFAULT_DOMAIN)
+        domain = site.get("url") or self.DEFAULT_DOMAIN
         if not domain.endswith("/"):
             domain += "/"
         cookie = site.get("cookie") or self._cookie
