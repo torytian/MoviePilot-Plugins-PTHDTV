@@ -4,7 +4,7 @@
     "name": "PTHDTV 站点搜索",
     "description": "为 MoviePilot V2 添加 PTHDTV.com (高清剧集网) 站点搜索支持，基于 Discuz 论坛两级抓取（搜索结果页 → 帖子详情页 → 种子下载链接）",
     "labels": ["搜索", "站点"],
-    "version": "2.0.0",
+    "version": "2.0.1",
     "icon": "movie.png",
     "author": "ToryTian",
     "level": 1,
@@ -13,7 +13,8 @@
       "v1.0.0": "初始版本",
       "v1.0.3": "合并 spider 到单文件，恢复 auth_level",
       "v1.0.5": "改用 SiteOper 写入数据库",
-      "v2.0.0": "索引注入：注入 SitesHelper 索引器列表使站点可被搜索；修正站点 domain/url 一致性；支持自定义搜索地址"
+      "v2.0.0": "索引注入：注入 SitesHelper 索引器列表使站点可被搜索；修正站点 domain/url 一致性；支持自定义搜索地址",
+      "v2.0.1": "Cookie 有效性保护，避免异常短值覆盖数据库中的有效 Cookie；搜索日志增加 Cookie 长度"
     }
   }
 }

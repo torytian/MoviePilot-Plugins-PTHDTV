@@ -29,7 +29,7 @@ class PTHDTVSearcher(_PluginBase):
     plugin_name = "PTHDTV 站点搜索"
     plugin_desc = "为 MoviePilot 添加 PTHDTV.com (高清剧集网) 站点搜索支持，自动实现 Discuz 论坛两级抓取"
     plugin_icon = "movie.png"
-    plugin_version = "2.0.0"
+    plugin_version = "2.0.1"
     plugin_author = "ToryTian"
     plugin_config_prefix = "pthdtv_searcher_"
     plugin_order = 20
@@ -275,12 +275,16 @@ class PTHDTVSearcher(_PluginBase):
                 "domain": self.SITE_DOMAIN,
                 "url": self._site_url,
                 "pri": 1,
-                "cookie": self._cookie,
                 "ua": self._ua or self.DEFAULT_UA,
                 "timeout": self._timeout,
                 "public": 0,
                 "is_active": True,
             }
+            # 仅当 Cookie 看起来有效时才写入，避免异常值覆盖已有有效 Cookie
+            if self._cookie and len(self._cookie) >= 10:
+                payload["cookie"] = self._cookie
+            elif not self._cookie:
+                logger.warn("PTHDTV 未配置 Cookie，保留数据库中已有 Cookie")
 
             row = oper.get_by_domain(self.SITE_DOMAIN)
             if row:
@@ -473,7 +477,7 @@ class PTHDTVSearcher(_PluginBase):
             f"&srhlocality=forum::forumdisplay&srchtxt={quote(search_word)}"
         )
 
-        logger.info(f"PTHDTV 开始搜索: {keyword}")
+        logger.info(f"PTHDTV 开始搜索: {keyword} (Cookie长度={len(cookie)})")
 
         try:
             resp = RequestUtils(ua=ua, cookies=cookie, timeout=timeout).get_res(
