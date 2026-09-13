@@ -17,11 +17,11 @@ from datetime import datetime
 from typing import Any, Dict, List, Tuple
 from urllib.parse import quote, urljoin
 
+import requests
 from pyquery import PyQuery
 
 from app.log import logger
 from app.plugins import _PluginBase
-from app.utils.http import RequestUtils
 from app.utils.string import StringUtils
 
 
@@ -29,7 +29,7 @@ class PTHDTVSearcher(_PluginBase):
     plugin_name = "PTHDTV 站点搜索"
     plugin_desc = "为 MoviePilot 添加 PTHDTV.com (高清剧集网) 站点搜索支持，自动实现 Discuz 论坛两级抓取"
     plugin_icon = "movie.png"
-    plugin_version = "2.1.0"
+    plugin_version = "2.2.0"
     plugin_author = "ToryTian"
     plugin_config_prefix = "pthdtv_searcher_"
     plugin_order = 20
@@ -473,6 +473,33 @@ class PTHDTVSearcher(_PluginBase):
         self._orig = {}
 
     # ------------------------------------------------------------------
+    # HTTP 请求
+    #
+    # 注意：此处刻意不使用 MoviePilot 的 RequestUtils。
+    # 它的 cookie_parse() 会对 Cookie 的「值」做 URL 解码（_url_decode_if_latin），
+    # 而 Discuz 的 auth 等 Cookie 本身是 URL 编码的（含 %2B 等），
+    # 二次解码后服务端 PHP 会再解一次（+ 被还原成空格），导致认证串损坏、登录态丢失。
+    # 因此这里把 Cookie 原样作为请求头发送。
+    # ------------------------------------------------------------------
+    def _http_get(self, url: str, cookie: str, ua: str, timeout: int,
+                  referer: str = None, proxies: dict = None):
+        headers = {"User-Agent": ua, "Cookie": cookie}
+        if referer:
+            headers["Referer"] = referer
+        try:
+            return requests.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                verify=False,
+                allow_redirects=True,
+                proxies=proxies,
+            )
+        except Exception as e:
+            logger.debug(f"PTHDTV 请求失败: {url} - {e}")
+            return None
+
+    # ------------------------------------------------------------------
     # 核心搜索逻辑（两级抓取）
     # ------------------------------------------------------------------
     def _do_search(self, site, keyword, page=0):
@@ -505,15 +532,17 @@ class PTHDTVSearcher(_PluginBase):
         logger.info(f"PTHDTV 开始搜索: {keyword} (Cookie长度={len(cookie)}, 代理={proxy or '直连'})")
 
         try:
-            resp = RequestUtils(ua=ua, cookies=cookie, timeout=timeout, proxies=proxies).get_res(
-                url=search_url, allow_redirects=True
-            )
+            resp = self._http_get(search_url, cookie, ua, timeout, proxies=proxies)
         except Exception as e:
             logger.error(f"PTHDTV 搜索请求失败: {e}")
             return []
 
-        if not resp or resp.status_code != 200:
-            logger.error(f"PTHDTV 搜索返回异常: HTTP {getattr(resp, 'status_code', None)}")
+        if resp is None:
+            logger.error("PTHDTV 搜索请求失败：无响应")
+            return []
+
+        if resp.status_code != 200:
+            logger.error(f"PTHDTV 搜索返回异常: HTTP {resp.status_code}")
             return []
 
         # Cookie 失效检测（Discuz 未登录会跳转到登录页或返回提示）
@@ -607,16 +636,8 @@ class PTHDTVSearcher(_PluginBase):
     def _fetch_torrent(self, thread_url: str, ua: str, cookie: str, timeout: int, base: str,
                        proxies: dict = None) -> str:
         """进入帖子详情页提取附件下载链接"""
-        try:
-            resp = RequestUtils(ua=ua, cookies=cookie, timeout=timeout, referer=base,
-                                proxies=proxies).get_res(
-                url=thread_url, allow_redirects=True
-            )
-        except Exception as e:
-            logger.debug(f"PTHDTV 打开帖子失败: {thread_url} - {e}")
-            return ""
-
-        if not resp or resp.status_code != 200:
+        resp = self._http_get(thread_url, cookie, ua, timeout, referer=base, proxies=proxies)
+        if resp is None or resp.status_code != 200:
             return ""
 
         doc = PyQuery(resp.text)
