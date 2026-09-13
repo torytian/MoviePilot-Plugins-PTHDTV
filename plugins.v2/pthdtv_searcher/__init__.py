@@ -29,7 +29,7 @@ class PTHDTVSearcher(_PluginBase):
     plugin_name = "PTHDTV 站点搜索"
     plugin_desc = "为 MoviePilot 添加 PTHDTV.com (高清剧集网) 站点搜索支持，自动实现 Discuz 论坛两级抓取"
     plugin_icon = "movie.png"
-    plugin_version = "2.0.1"
+    plugin_version = "2.1.0"
     plugin_author = "ToryTian"
     plugin_config_prefix = "pthdtv_searcher_"
     plugin_order = 20
@@ -62,6 +62,7 @@ class PTHDTVSearcher(_PluginBase):
     _timeout = 30
     _site_url = DEFAULT_SITE_URL
     _search_base = DEFAULT_SEARCH_BASE
+    _proxy = ""
     _site_id = 0
 
     _orig = {}
@@ -77,6 +78,7 @@ class PTHDTVSearcher(_PluginBase):
             self._timeout = int(config.get("timeout") or 30)
             self._site_url = config.get("site_url") or self.DEFAULT_SITE_URL
             self._search_base = config.get("search_base") or self.DEFAULT_SEARCH_BASE
+            self._proxy = config.get("proxy") or ""
 
         if not self._enabled:
             self._teardown()
@@ -197,6 +199,25 @@ class PTHDTVSearcher(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "proxy",
+                                            "label": "出口代理（可选，站点请求走此代理，用于解决地区限制）",
+                                            "placeholder": "http://100.72.222.56:8899",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
@@ -255,6 +276,7 @@ class PTHDTVSearcher(_PluginBase):
             "cookie": "",
             "site_url": self.DEFAULT_SITE_URL,
             "search_base": self.DEFAULT_SEARCH_BASE,
+            "proxy": "",
             "ua": "",
             "timeout": 30,
         }
@@ -467,6 +489,9 @@ class PTHDTVSearcher(_PluginBase):
         ua = site.get("ua") or self._ua or self.DEFAULT_UA
         timeout = int(site.get("timeout") or self._timeout)
 
+        proxy = site.get("plugin_proxy") or self._proxy
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+
         if not cookie:
             logger.warn("PTHDTV 搜索跳过：未配置 Cookie")
             return []
@@ -477,10 +502,10 @@ class PTHDTVSearcher(_PluginBase):
             f"&srhlocality=forum::forumdisplay&srchtxt={quote(search_word)}"
         )
 
-        logger.info(f"PTHDTV 开始搜索: {keyword} (Cookie长度={len(cookie)})")
+        logger.info(f"PTHDTV 开始搜索: {keyword} (Cookie长度={len(cookie)}, 代理={proxy or '直连'})")
 
         try:
-            resp = RequestUtils(ua=ua, cookies=cookie, timeout=timeout).get_res(
+            resp = RequestUtils(ua=ua, cookies=cookie, timeout=timeout, proxies=proxies).get_res(
                 url=search_url, allow_redirects=True
             )
         except Exception as e:
@@ -507,7 +532,7 @@ class PTHDTVSearcher(_PluginBase):
         for item in results:
             if len(final) >= self.MAX_RESULTS:
                 break
-            torrent_url = self._fetch_torrent(item["thread_url"], ua, cookie, timeout, base)
+            torrent_url = self._fetch_torrent(item["thread_url"], ua, cookie, timeout, base, proxies)
             if torrent_url:
                 item["enclosure"] = torrent_url
                 item.pop("thread_url", None)
@@ -579,10 +604,12 @@ class PTHDTVSearcher(_PluginBase):
 
         return results
 
-    def _fetch_torrent(self, thread_url: str, ua: str, cookie: str, timeout: int, base: str) -> str:
+    def _fetch_torrent(self, thread_url: str, ua: str, cookie: str, timeout: int, base: str,
+                       proxies: dict = None) -> str:
         """进入帖子详情页提取附件下载链接"""
         try:
-            resp = RequestUtils(ua=ua, cookies=cookie, timeout=timeout, referer=base).get_res(
+            resp = RequestUtils(ua=ua, cookies=cookie, timeout=timeout, referer=base,
+                                proxies=proxies).get_res(
                 url=thread_url, allow_redirects=True
             )
         except Exception as e:
