@@ -1,4 +1,16 @@
 # -*- coding: utf-8 -*-
+"""
+PTHDTV 站点搜索插件 (MoviePilot V2)
+
+PTHDTV.com 基于 Discuz! X3.4 论坛，种子下载链接在帖子详情页内，
+需要两级抓取：搜索结果页 -> 帖子详情页 -> 附件下载链接。
+
+实现方式：
+1. 索引注入：把 PTHDTV 索引器定义注入 SitesHelper.get_indexers()，
+   使其进入 MoviePilot 的搜索候选集（否则自定义域名会被直接过滤掉）。
+2. 搜索接管：monkey-patch IndexerModule.search_torrents，
+   命中 PTHDTV 时执行两级抓取。
+"""
 import re
 import time
 from datetime import datetime
@@ -6,6 +18,7 @@ from typing import Any, Dict, List, Tuple
 from urllib.parse import quote, urljoin
 
 from pyquery import PyQuery
+
 from app.log import logger
 from app.plugins import _PluginBase
 from app.utils.http import RequestUtils
@@ -16,39 +29,69 @@ class PTHDTVSearcher(_PluginBase):
     plugin_name = "PTHDTV 站点搜索"
     plugin_desc = "为 MoviePilot 添加 PTHDTV.com (高清剧集网) 站点搜索支持，自动实现 Discuz 论坛两级抓取"
     plugin_icon = "movie.png"
-    plugin_version = "1.0.6"
+    plugin_version = "2.0.0"
     plugin_author = "ToryTian"
     plugin_config_prefix = "pthdtv_searcher_"
     plugin_order = 20
     auth_level = 1
 
-    DEFAULT_DOMAIN = "https://10002.baidubaidu.win"
+    # ---- 站点标识 ----
+    SITE_NAME = "PTHDTV"
+    # 数据库 domain 字段（必须与 site_url 的二级域名一致，否则 MP 连接测试会报"站点不存在"）
+    SITE_DOMAIN = "pthdtv.com"
+    # 对外地址（用于站点管理展示与连接测试）
+    DEFAULT_SITE_URL = "https://www.pthdtv.com"
+    # 实际搜索地址（可随时在插件配置中修改）
+    DEFAULT_SEARCH_BASE = "https://10002.baidubaidu.win"
+    # 自定义 parser 标识
+    PARSER = "PTHDTV"
+
+    # ---- 抓取参数 ----
     FORUM_FID = 2
-    SEARCH_TIMEOUT = 30
-    DETAIL_INTERVAL = 1.5
+    DETAIL_INTERVAL = 1.2
     MAX_RESULTS = 50
+
+    DEFAULT_UA = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
 
     _enabled = False
     _cookie = ""
     _ua = ""
     _timeout = 30
-    _original_search = None
+    _site_url = DEFAULT_SITE_URL
+    _search_base = DEFAULT_SEARCH_BASE
+    _site_id = 0
 
+    _orig = {}
+
+    # ------------------------------------------------------------------
+    # 生命周期
+    # ------------------------------------------------------------------
     def init_plugin(self, config: dict = None):
         if config:
-            self._enabled = config.get("enabled", False)
-            self._cookie = config.get("cookie", "")
-            self._ua = config.get("ua", "")
-            self._timeout = int(config.get("timeout", 30))
+            self._enabled = bool(config.get("enabled"))
+            self._cookie = config.get("cookie") or ""
+            self._ua = config.get("ua") or ""
+            self._timeout = int(config.get("timeout") or 30)
+            self._site_url = config.get("site_url") or self.DEFAULT_SITE_URL
+            self._search_base = config.get("search_base") or self.DEFAULT_SEARCH_BASE
+
         if not self._enabled:
-            self._unpatch_search()
+            self._teardown()
             return
+
         if not self._cookie:
-            logger.warn("PTHDTV 插件已启用但未配置 Cookie")
+            logger.warn("PTHDTV 插件已启用但未配置 Cookie，暂不生效")
             return
-        self._register_site()
+
+        self._ensure_db_site()
+        self._patch_sites_helper()
         self._patch_search()
-        logger.info("PTHDTV 站点搜索插件已启动")
+        logger.info(
+            f"PTHDTV 站点搜索插件已启动 (站点ID={self._site_id}, 搜索域名={self._search_base})"
+        )
 
     def get_state(self) -> bool:
         return self._enabled
@@ -60,6 +103,19 @@ class PTHDTVSearcher(_PluginBase):
     def get_api(self) -> List[Dict[str, Any]]:
         return []
 
+    def get_page(self) -> List[dict]:
+        return []
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        return []
+
+    def stop_service(self):
+        self._teardown()
+        logger.info("PTHDTV 站点搜索插件已停止")
+
+    # ------------------------------------------------------------------
+    # 配置表单
+    # ------------------------------------------------------------------
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [
             {
@@ -77,11 +133,11 @@ class PTHDTVSearcher(_PluginBase):
                                         "props": {
                                             "model": "enabled",
                                             "label": "启用 PTHDTV 站点搜索",
-                                        }
+                                        },
                                     }
-                                ]
+                                ],
                             }
-                        ]
+                        ],
                     },
                     {
                         "component": "VRow",
@@ -96,33 +152,66 @@ class PTHDTVSearcher(_PluginBase):
                                             "model": "cookie",
                                             "label": "PTHDTV 站点 Cookie",
                                             "rows": 3,
-                                            "placeholder": "从浏览器开发者工具复制 PTHDTV 的 Cookie 值",
-                                        }
+                                            "placeholder": "从浏览器开发者工具复制 PTHDTV 的完整 Cookie",
+                                        },
                                     }
-                                ]
+                                ],
                             }
-                        ]
+                        ],
                     },
                     {
                         "component": "VRow",
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 8},
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "search_base",
+                                            "label": "站点搜索地址",
+                                            "placeholder": self.DEFAULT_SEARCH_BASE,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "site_url",
+                                            "label": "站点对外地址",
+                                            "placeholder": self.DEFAULT_SITE_URL,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VTextField",
                                         "props": {
                                             "model": "ua",
-                                            "label": "User-Agent（可选）",
-                                            "placeholder": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",
-                                        }
+                                            "label": "User-Agent（可选，建议与浏览器一致）",
+                                            "placeholder": "Mozilla/5.0 ...",
+                                        },
                                     }
-                                ]
+                                ],
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -130,11 +219,11 @@ class PTHDTVSearcher(_PluginBase):
                                             "model": "timeout",
                                             "label": "超时时间（秒）",
                                             "placeholder": "30",
-                                        }
+                                        },
                                     }
-                                ]
-                            }
-                        ]
+                                ],
+                            },
+                        ],
                     },
                     {
                         "component": "VRow",
@@ -147,106 +236,244 @@ class PTHDTVSearcher(_PluginBase):
                                         "component": "VAlert",
                                         "props": {
                                             "type": "info",
-                                            "text": "插件说明：\n"
-                                                    "1. 此插件为 PTHDTV.com (高清剧集网) 添加搜索支持\n"
-                                                    "2. 站点基于 Discuz 论坛，插件会自动实现两级抓取\n"
-                                                    "3. Cookie 仅用于请求 PTHDTV 站点，不会上传到第三方",
-                                            "variant": "tonal"
-                                        }
+                                            "variant": "tonal",
+                                            "text": "说明：\n"
+                                                    "1. 启用后会向 MoviePilot 注入 PTHDTV 索引器，并在站点管理中创建/更新对应站点。\n"
+                                                    "2. 搜索执行两级抓取：搜索结果页 -> 帖子详情页 -> 附件下载链接，因此结果会稍慢。\n"
+                                                    "3. Cookie 仅用于访问 PTHDTV 站点，不会上传到任何第三方。\n"
+                                                    "4. 若站点换域名，只需修改上面的「站点搜索地址」后重新保存即可。",
+                                        },
                                     }
-                                ]
+                                ],
                             }
-                        ]
-                    }
+                        ],
+                    },
                 ]
             }
         ], {
             "enabled": False,
             "cookie": "",
+            "site_url": self.DEFAULT_SITE_URL,
+            "search_base": self.DEFAULT_SEARCH_BASE,
             "ua": "",
             "timeout": 30,
         }
 
-    def get_page(self) -> List[dict]:
-        return []
-
-    def get_service(self) -> List[Dict[str, Any]]:
-        return []
-
-    def stop_service(self):
-        self._unpatch_search()
-        logger.info("PTHDTV 站点搜索插件已停止")
-
-    def _register_site(self):
+    # ------------------------------------------------------------------
+    # 1. 数据库站点（供站点管理页面展示 / 连接测试）
+    # ------------------------------------------------------------------
+    def _ensure_db_site(self):
         try:
             from app.db import get_db
             from app.db.site_oper import SiteOper
+
             db = next(get_db())
             oper = SiteOper(db)
-            domain = "pthdtv.com"
-            if not oper.exists(domain):
-                oper.add(
-                    name="PTHDTV",
-                    domain=domain,
-                    url=self.DEFAULT_DOMAIN,
-                    pri=1,
-                    cookie=self._cookie,
-                    ua=self._ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    timeout=self._timeout,
-                    is_active=True,
-                    public=0,
-                )
-                logger.info("PTHDTV 站点已写入数据库")
-            else:
-                oper.update_cookie(domain, self._cookie)
-                logger.info("PTHDTV 站点已存在，Cookie 已更新")
-        except Exception as e:
-            logger.error(f"PTHDTV 站点注册失败: {e}")
 
+            payload = {
+                "name": self.SITE_NAME,
+                "domain": self.SITE_DOMAIN,
+                "url": self._site_url,
+                "pri": 1,
+                "cookie": self._cookie,
+                "ua": self._ua or self.DEFAULT_UA,
+                "timeout": self._timeout,
+                "public": 0,
+                "is_active": True,
+            }
+
+            row = oper.get_by_domain(self.SITE_DOMAIN)
+            if row:
+                oper.update(row.id, payload)
+                self._site_id = row.id
+            else:
+                legacy = None
+                for item in (oper.list() or []):
+                    if item.name == self.SITE_NAME:
+                        legacy = item
+                        break
+                if legacy:
+                    oper.update(legacy.id, payload)
+                    self._site_id = legacy.id
+                else:
+                    oper.add(**payload)
+                    created = oper.get_by_domain(self.SITE_DOMAIN)
+                    self._site_id = created.id if created else 0
+
+            logger.info(f"PTHDTV 站点记录已就绪 (id={self._site_id}, domain={self.SITE_DOMAIN})")
+        except Exception as e:
+            logger.error(f"PTHDTV 写入站点记录失败: {e}")
+
+    # ------------------------------------------------------------------
+    # 2. 索引注入（让 MP 的搜索候选集包含 PTHDTV）
+    # ------------------------------------------------------------------
+    def _indexer_def(self) -> dict:
+        return {
+            "id": self._site_id or 0,
+            "name": self.SITE_NAME,
+            "domain": self.SITE_DOMAIN,
+            "url": self._site_url,
+            "encoding": "UTF-8",
+            "public": False,
+            "parser": self.PARSER,
+            "timeout": self._timeout,
+            "result_num": self.MAX_RESULTS,
+            "proxy": False,
+            "render": False,
+            "language": "zh",
+            "search": {
+                "paths": [
+                    {
+                        "path": "search.php?mod=forum&searchsubmit=yes&srchtype=title"
+                                f"&srhfid={self.FORUM_FID}"
+                                "&srhlocality=forum::forumdisplay&srchtxt={keyword}",
+                        "method": "get",
+                    }
+                ],
+            },
+            "torrents": {
+                "list": {"selector": "li.pbw"},
+                "fields": {
+                    "title": {"selector": "h3.xs3 a"},
+                    "details": {"selector": "h3.xs3 a", "attribute": "href"},
+                },
+            },
+            "category": {"movie": [], "tv": []},
+        }
+
+    def _inject_indexer(self, indexers):
+        if not isinstance(indexers, list):
+            return indexers
+        for item in indexers:
+            if not isinstance(item, dict):
+                continue
+            if item.get("domain") == self.SITE_DOMAIN or item.get("name") == self.SITE_NAME:
+                return indexers
+        indexers.append(self._indexer_def())
+        return indexers
+
+    def _patch_sites_helper(self):
+        try:
+            from app.helper.sites import SitesHelper
+
+            self._orig["SitesHelper"] = SitesHelper
+            plugin = self
+
+            if "get_indexers" not in self._orig:
+                self._orig["get_indexers"] = getattr(SitesHelper, "get_indexers", None)
+            orig_get = self._orig.get("get_indexers")
+            if orig_get:
+                def get_indexers(_self):
+                    try:
+                        data = orig_get(_self)
+                    except Exception as err:
+                        logger.error(f"PTHDTV 读取索引器失败: {err}")
+                        data = []
+                    return plugin._inject_indexer(data)
+
+                SitesHelper.get_indexers = get_indexers
+
+            if "async_get_indexers" not in self._orig:
+                self._orig["async_get_indexers"] = getattr(SitesHelper, "async_get_indexers", None)
+            orig_async = self._orig.get("async_get_indexers")
+            if orig_async:
+                async def async_get_indexers(_self):
+                    try:
+                        data = await orig_async(_self)
+                    except Exception as err:
+                        logger.error(f"PTHDTV 读取索引器失败: {err}")
+                        data = []
+                    return plugin._inject_indexer(data)
+
+                SitesHelper.async_get_indexers = async_get_indexers
+
+            logger.info("PTHDTV 索引注入已安装")
+        except Exception as e:
+            logger.error(f"PTHDTV 索引注入失败: {e}")
+
+    # ------------------------------------------------------------------
+    # 3. 搜索接管
+    # ------------------------------------------------------------------
     def _patch_search(self):
         try:
             from app.modules.indexer import IndexerModule
-            if self._original_search is None:
-                self._original_search = IndexerModule.search_torrents
-            original = self._original_search
+
+            self._orig["IndexerModule"] = IndexerModule
+            if "search_torrents" not in self._orig:
+                self._orig["search_torrents"] = IndexerModule.search_torrents
+
+            original = self._orig["search_torrents"]
             plugin = self
+
             def patched_search_torrents(self_, site, keyword=None, mtype=None, cat=None, page=0):
-                if site.get("domain") == "pthdtv.com" or site.get("name") == "PTHDTV":
+                if plugin._is_pthdtv(site):
                     return plugin._do_search(site, keyword, page)
                 return original(self_, site, keyword=keyword, mtype=mtype, cat=cat, page=page)
+
             IndexerModule.search_torrents = patched_search_torrents
-            logger.info("PTHDTV 搜索 patch 已安装")
+            logger.info("PTHDTV 搜索接管已安装")
         except Exception as e:
-            logger.error(f"PTHDTV 搜索 patch 安装失败: {e}")
+            logger.error(f"PTHDTV 搜索接管失败: {e}")
 
-    def _unpatch_search(self):
-        if self._original_search is not None:
-            try:
-                from app.modules.indexer import IndexerModule
-                IndexerModule.search_torrents = self._original_search
-                self._original_search = None
-                logger.info("PTHDTV 搜索 patch 已卸载")
-            except Exception:
-                pass
+    @classmethod
+    def _is_pthdtv(cls, site) -> bool:
+        if not isinstance(site, dict):
+            return False
+        return (
+            site.get("domain") == cls.SITE_DOMAIN
+            or site.get("name") == cls.SITE_NAME
+            or site.get("parser") == cls.PARSER
+        )
 
+    def _teardown(self):
+        """还原所有 monkey-patch"""
+        try:
+            helper = self._orig.get("SitesHelper")
+            if helper:
+                if self._orig.get("get_indexers"):
+                    helper.get_indexers = self._orig["get_indexers"]
+                if self._orig.get("async_get_indexers"):
+                    helper.async_get_indexers = self._orig["async_get_indexers"]
+        except Exception:
+            pass
+
+        try:
+            indexer = self._orig.get("IndexerModule")
+            if indexer and self._orig.get("search_torrents"):
+                indexer.search_torrents = self._orig["search_torrents"]
+        except Exception:
+            pass
+
+        self._orig = {}
+
+    # ------------------------------------------------------------------
+    # 核心搜索逻辑（两级抓取）
+    # ------------------------------------------------------------------
     def _do_search(self, site, keyword, page=0):
         from app.core.context import TorrentInfo
+
         if not keyword:
             return []
+
         search_word = StringUtils.clear(keyword, replace_word=" ", allow_space=True)
         start_time = datetime.now()
-        domain = site.get("url") or self.DEFAULT_DOMAIN
-        if not domain.endswith("/"):
-            domain += "/"
+
+        base = (site.get("search_base") or self._search_base or self.DEFAULT_SEARCH_BASE).rstrip("/") + "/"
         cookie = site.get("cookie") or self._cookie
-        ua = site.get("ua") or self._ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        ua = site.get("ua") or self._ua or self.DEFAULT_UA
         timeout = int(site.get("timeout") or self._timeout)
 
+        if not cookie:
+            logger.warn("PTHDTV 搜索跳过：未配置 Cookie")
+            return []
+
         search_url = (
-            f"{domain}search.php?mod=forum&searchsubmit=yes"
+            f"{base}search.php?mod=forum&searchsubmit=yes"
             f"&srchtype=title&srhfid={self.FORUM_FID}"
             f"&srhlocality=forum::forumdisplay&srchtxt={quote(search_word)}"
         )
+
+        logger.info(f"PTHDTV 开始搜索: {keyword}")
 
         try:
             resp = RequestUtils(ua=ua, cookies=cookie, timeout=timeout).get_res(
@@ -257,20 +484,26 @@ class PTHDTVSearcher(_PluginBase):
             return []
 
         if not resp or resp.status_code != 200:
-            logger.error(f"PTHDTV 搜索返回异常: HTTP {resp.status_code if resp else 'None'}")
+            logger.error(f"PTHDTV 搜索返回异常: HTTP {getattr(resp, 'status_code', None)}")
             return []
 
-        results = self._parse_results(resp.text, domain)
+        # Cookie 失效检测（Discuz 未登录会跳转到登录页或返回提示）
+        if "logging" in (resp.url or "") and "action=login" in (resp.text or ""):
+            logger.error("PTHDTV 搜索失败：Cookie 已失效，请在插件中更新 Cookie")
+            return []
+
+        results = self._parse_results(resp.text, base)
         if not results:
-            logger.info(f"PTHDTV 搜索 '{keyword}' 未找到结果")
+            logger.info(f"PTHDTV 搜索 '{keyword}' 未匹配到帖子")
             return []
 
-        logger.info(f"PTHDTV 搜索到 {len(results)} 条结果，开始抓取种子链接...")
+        logger.info(f"PTHDTV 匹配到 {len(results)} 个帖子，开始提取种子链接...")
+
         final = []
         for item in results:
             if len(final) >= self.MAX_RESULTS:
                 break
-            torrent_url = self._fetch_torrent(item["thread_url"], ua, cookie, timeout, domain)
+            torrent_url = self._fetch_torrent(item["thread_url"], ua, cookie, timeout, base)
             if torrent_url:
                 item["enclosure"] = torrent_url
                 item.pop("thread_url", None)
@@ -278,80 +511,129 @@ class PTHDTVSearcher(_PluginBase):
             time.sleep(self.DETAIL_INTERVAL)
 
         seconds = (datetime.now() - start_time).seconds
-        logger.info(f"PTHDTV 搜索完成，耗时 {seconds}s，返回 {len(final)} 条")
+        logger.info(f"PTHDTV 搜索完成，耗时 {seconds} 秒，有效种子 {len(final)} 条")
 
-        return [
-            TorrentInfo(
-                site=site.get("id"),
-                site_name=site.get("name"),
-                site_cookie=cookie,
-                site_ua=ua,
-                site_proxy=site.get("proxy"),
-                site_order=site.get("pri"),
-                **r,
-            )
-            for r in final
-        ]
+        torrents = []
+        for r in final:
+            try:
+                torrents.append(
+                    TorrentInfo(
+                        site=site.get("id") or "pthdtv",
+                        site_name=site.get("name") or self.SITE_NAME,
+                        site_cookie=cookie,
+                        site_ua=ua,
+                        site_proxy=site.get("proxy"),
+                        site_order=site.get("pri") or 1,
+                        **r,
+                    )
+                )
+            except Exception as e:
+                logger.error(f"PTHDTV 组装结果失败: {e}")
 
-    def _parse_results(self, html, domain):
+        return torrents
+
+    def _parse_results(self, html: str, base: str) -> List[dict]:
         results = []
         doc = PyQuery(html)
+
         for item in doc("li.pbw").items():
-            title_link = item("h3.xs3 a")
-            if not title_link:
+            link = item("h3.xs3 a")
+            if not link:
                 continue
-            title = title_link.text()
+
+            title = link.text() or ""
             if not title:
                 continue
-            title = re.sub(r'^【[^】]*】', '', title).strip()
-            title = re.sub(r'\s+', ' ', title)
-            href = title_link.attr("href") or ""
-            thread_url = self._abs_url(href, domain)
+
+            title = self._clean_title(title)
+            thread_url = self._abs_url(link.attr("href") or "", base)
             if not thread_url:
                 continue
-            size = 0
-            m = re.search(r'([\d.]+)\s*(GB|MB|TB|KB)', title, re.IGNORECASE)
-            if m:
-                num = float(m.group(1))
-                unit = m.group(2).upper()
-                mult = {"KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
-                size = num * mult.get(unit, 0)
+
+            pubdate = ""
+            date_node = item("p:last span:first")
+            if date_node:
+                pubdate = date_node.attr("title") or date_node.text() or ""
+
             results.append({
                 "title": title,
                 "description": "",
                 "enclosure": "",
                 "page_url": thread_url,
                 "thread_url": thread_url,
-                "size": size,
+                "size": self._extract_size(title),
                 "seeders": 0,
                 "peers": 0,
-                "grabs": 0,
-                "pubdate": "",
+                "grabs": self._extract_views(item),
+                "pubdate": pubdate,
                 "date_elapsed": "",
                 "uploadvolumefactor": 1.0,
                 "downloadvolumefactor": 1.0,
                 "labels": [],
                 "category": "TV",
             })
+
         return results
 
-    def _fetch_torrent(self, thread_url, ua, cookie, timeout, domain):
+    def _fetch_torrent(self, thread_url: str, ua: str, cookie: str, timeout: int, base: str) -> str:
+        """进入帖子详情页提取附件下载链接"""
         try:
-            resp = RequestUtils(ua=ua, cookies=cookie, timeout=timeout, referer=domain).get_res(
+            resp = RequestUtils(ua=ua, cookies=cookie, timeout=timeout, referer=base).get_res(
                 url=thread_url, allow_redirects=True
             )
-        except Exception:
+        except Exception as e:
+            logger.debug(f"PTHDTV 打开帖子失败: {thread_url} - {e}")
             return ""
+
         if not resp or resp.status_code != 200:
             return ""
+
         doc = PyQuery(resp.text)
-        link = doc('a[href*="mod=attachment"]')
-        if link:
-            return self._abs_url(link.attr("href") or "", domain)
+
+        # 优先取 .torrent 附件
+        for node in doc('a[href*="mod=attachment"]').items():
+            href = node.attr("href") or ""
+            text = (node.text() or "").lower()
+            if ".torrent" in text or ".torrent" in href.lower():
+                return self._abs_url(href, base)
+
+        # 退而求其次：任意附件链接
+        node = doc('a[href*="mod=attachment"]')
+        if node:
+            return self._abs_url(node.attr("href") or "", base)
+
         return ""
 
+    # ------------------------------------------------------------------
+    # 工具方法
+    # ------------------------------------------------------------------
     @staticmethod
-    def _abs_url(href, domain):
+    def _clean_title(title: str) -> str:
+        title = re.sub(r"^【[^】]*】", "", title)
+        title = re.sub(r"\s+", " ", title)
+        return title.strip()
+
+    @staticmethod
+    def _extract_size(text: str) -> float:
+        match = re.search(r"([\d.]+)\s*(TB|GB|MB|KB)", text, re.IGNORECASE)
+        if not match:
+            return 0
+        number = float(match.group(1))
+        unit = match.group(2).upper()
+        multipliers = {"KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3, "TB": 1024 ** 4}
+        return number * multipliers.get(unit, 0)
+
+    @staticmethod
+    def _extract_views(item) -> int:
+        try:
+            text = item("p.xg1").text() or ""
+            match = re.search(r"(\d+)\s*次查看", text)
+            return int(match.group(1)) if match else 0
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _abs_url(href: str, base: str) -> str:
         if not href:
             return ""
         if href.startswith("http"):
@@ -359,5 +641,5 @@ class PTHDTVSearcher(_PluginBase):
         if href.startswith("//"):
             return "https:" + href
         if href.startswith("/"):
-            return domain.rstrip("/") + href
-        return urljoin(domain, href)
+            return base.rstrip("/") + href
+        return urljoin(base, href)
