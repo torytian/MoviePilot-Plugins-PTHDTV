@@ -41,7 +41,7 @@ class PTHDTVSearcher(_PluginBase):
     plugin_name = "PTHDTV 站点搜索"
     plugin_desc = "为 MoviePilot 添加 PTHDTV.com (高清剧集网) 站点搜索支持，自动实现 Discuz 论坛两级抓取"
     plugin_icon = "movie.png"
-    plugin_version = "2.4.0"
+    plugin_version = "2.5.0"
     plugin_author = "ToryTian"
     plugin_config_prefix = "pthdtv_searcher_"
     plugin_order = 20
@@ -103,6 +103,7 @@ class PTHDTVSearcher(_PluginBase):
         self._ensure_db_site()
         self._patch_sites_helper()
         self._patch_search()
+        self._patch_download()
         logger.info(
             f"PTHDTV 站点搜索插件已启动 (站点ID={self._site_id}, 搜索域名={self._search_base})"
         )
@@ -489,6 +490,116 @@ class PTHDTVSearcher(_PluginBase):
             or site.get("parser") == cls.PARSER
         )
 
+    @classmethod
+    def _is_pthdtv_url(cls, url: str) -> bool:
+        if not url:
+            return False
+        lower = url.lower()
+        return "baidubaidu.win" in lower or "pthdtv.com" in lower
+
+    # ------------------------------------------------------------------
+    # 4. 下载接管
+    #
+    # MP 下载种子走 app/helper/torrent.py 的 TorrentHelper.download_torrent：
+    #    RequestUtils(ua, cookies=cookie).get_res(url)
+    # RequestUtils 的 cookie_parse 会对 Cookie 的每个值执行 unquote（URL 解码），
+    # 而 Discuz 的 auth Cookie 本身是 URL 编码的（含 %2B），解码后认证串被破坏，
+    # 站点返回未登录，req 为 None -> 报「无法打开链接」。
+    # 因此命中 PTHDTV 域名时，改由本插件用 urllib + 原始 Cookie 下载，
+    # 复用它原方法的缓存与种子解析逻辑。
+    # ------------------------------------------------------------------
+    def _patch_download(self):
+        try:
+            from app.helper.torrent import TorrentHelper
+
+            if "TorrentHelper_download_torrent" not in self._orig:
+                self._orig["TorrentHelper_download_torrent"] = TorrentHelper.download_torrent
+            original = self._orig["TorrentHelper_download_torrent"]
+            plugin = self
+
+            def patched_download_torrent(self_, url: str, cookie=None, ua=None,
+                                         referer=None, proxy=False, cache_invalid=True):
+                if plugin._is_pthdtv_url(url):
+                    return plugin._pthdtv_download_torrent(self_, url, cookie, ua, referer)
+                return original(self_, url=url, cookie=cookie, ua=ua,
+                                referer=referer, proxy=proxy, cache_invalid=cache_invalid)
+
+            TorrentHelper.download_torrent = patched_download_torrent
+            logger.info("PTHDTV 种子下载接管已安装")
+        except Exception as e:
+            logger.error(f"PTHDTV 种子下载接管失败: {e}")
+
+    def _http_get_raw(self, url: str, cookie: str, ua: str, timeout: int,
+                      referer: str = None, proxies: dict = None):
+        """返回原始字节的 GET，用于下载二进制种子文件（不能走 _http_get 的文本解码）"""
+        headers = {"User-Agent": ua, "Cookie": cookie}
+        if referer:
+            headers["Referer"] = referer
+        request = urllib.request.Request(url, headers=headers)
+        opener = self._build_opener(proxies)
+        try:
+            with opener.open(request, timeout=timeout) as raw:
+                return raw.status, raw.geturl(), raw.read()
+        except urllib.error.HTTPError as err:
+            body = err.read() if hasattr(err, "read") else b""
+            return err.code, getattr(err, "url", url), body
+        except Exception as err:
+            logger.debug(f"PTHDTV 种子下载请求失败: {url} - {err}")
+            return None, url, b""
+
+    def _pthdtv_download_torrent(self, th, url: str, cookie, ua, referer):
+        from pathlib import Path
+
+        from app.core.cache import FileCache
+
+        cookie = cookie or self._cookie
+        ua = ua or self._ua or self.DEFAULT_UA
+        timeout = int(self._timeout)
+        proxy = self._proxy
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+        referer = referer or (self._search_base or self.DEFAULT_SEARCH_BASE)
+
+        cache_path = Path(StringUtils.md5_hash(url)).with_suffix(".torrent")
+        cache_backend = FileCache()
+        torrent_content = cache_backend.get(cache_path.as_posix(), region="torrents")
+        if torrent_content:
+            try:
+                folder_name, file_list = th.get_fileinfo_from_torrent_content(torrent_content)
+                if not folder_name and not file_list:
+                    raise ValueError("无效的缓存种子文件")
+                return cache_path, torrent_content, folder_name, file_list, ""
+            except Exception as err:
+                logger.error(f"PTHDTV 处理缓存的种子文件 {cache_path} 时出错: {err}，将重新下载")
+
+        logger.info(f"PTHDTV 下载种子: {url} (Cookie长度={len(cookie)}, 代理={proxy or '直连'})")
+        status, _final_url, content = self._http_get_raw(
+            url, cookie, ua, timeout, referer=referer, proxies=proxies
+        )
+
+        if status is None:
+            return cache_path, None, "", [], "无法打开链接"
+        if status == 429:
+            return cache_path, None, "", [], "触发站点流控，请稍后重试"
+        if status != 200:
+            return cache_path, None, "", [], f"下载种子出错，状态码：{status}"
+        if not content:
+            return cache_path, None, "", [], "未下载到种子数据"
+        if content.startswith(b"magnet:"):
+            return cache_path, content.decode("utf-8", "ignore"), "", [], "获取到磁力链接"
+        # 若拿回的是 HTML（登录/无权限/确认页）而非种子文件，直接失败
+        head = content.lstrip()[:512].lower()
+        if "下载种子文件".encode("utf-8") in content or b"<html" in head or b"<!doctype" in head or b"<script" in head:
+            return cache_path, None, "", [], "无法打开链接"
+
+        try:
+            folder_name, file_list = th.get_fileinfo_from_torrent_content(content)
+            if file_list:
+                cache_backend.set(cache_path.as_posix(), content, region="torrents")
+            return cache_path, content, folder_name, file_list, ""
+        except Exception as err:
+            logger.error(f"PTHDTV 种子文件解析失败: {err}")
+            return cache_path, None, "", [], "种子数据有误，请确认链接是否正确"
+
     def _teardown(self):
         """还原所有 monkey-patch"""
         try:
@@ -508,6 +619,15 @@ class PTHDTVSearcher(_PluginBase):
                     indexer.search_torrents = self._orig["search_torrents"]
                 if self._orig.get("async_search_torrents"):
                     indexer.async_search_torrents = self._orig["async_search_torrents"]
+        except Exception:
+            pass
+
+        try:
+            from app.helper.torrent import TorrentHelper
+
+            orig_dl = self._orig.get("TorrentHelper_download_torrent")
+            if orig_dl:
+                TorrentHelper.download_torrent = orig_dl
         except Exception:
             pass
 
